@@ -13,6 +13,12 @@ from config import BOT_TOKEN
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 DB_NAME = "watchlist.db"
 
+# === 1. मैन्युअल ISIN मैपिंग (Yahoo API के फेलियर से बचने के लिए) ===
+MANUAL_ISIN_MAPPING = {
+    "INE732K01027": "511557.BO",      # प्रो-फिन कैपिटल
+    "INE0PQ601019": "530299.BO",      # बालाजी फॉस्फेट्स (BSE Scrip Code)
+}
+
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -22,6 +28,11 @@ def init_db():
 
 def resolve_isin_to_ticker(symbol_or_isin):
     target = symbol_or_isin.strip().upper()
+    
+    # पहले मैनुअल मैपिंग चेक करें
+    if target in MANUAL_ISIN_MAPPING:
+        return MANUAL_ISIN_MAPPING[target]
+        
     if len(target) == 12 and target.startswith("INE"):
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={target}&quotesCount=3&newsCount=0"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -34,7 +45,6 @@ def resolve_isin_to_ticker(symbol_or_isin):
                     for q in quotes:
                         sym = q.get("symbol", "")
                         if sym.endswith(".NS") or sym.endswith(".BO"):
-                            # प्रो-फिन का स्पेशल ऑटो-करेक्शन पैच
                             if "PROFINC.BO" in sym: return "511557.BO"
                             return sym
                     fallback = quotes[0].get("symbol", "")
@@ -42,8 +52,6 @@ def resolve_isin_to_ticker(symbol_or_isin):
                     return fallback
         except Exception as e:
             logging.error(f"ISIN Error: {e}")
-    
-    if "PROFINC.BO" in target: return "511557.BO"
     return target
 
 class DummyServer(BaseHTTPRequestHandler):
@@ -51,7 +59,7 @@ class DummyServer(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bot is active with advanced ISIN & Name resolving feature.")
+        self.wfile.write(b"Bot is active and bugs are fully fixed.")
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 10000))
@@ -59,7 +67,7 @@ def run_dummy_server():
     server.serve_forever()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "🤖 **AI STOCK ASSISTANT v3.1 (Smart Watchlist)**\n\nअब आपकी वॉचलिस्ट टिकर कोड की जगह सीधे **कंपनी के नाम** और वीकडे/वीकेंड सेफ लाइव रेट के साथ दिखेगी! 🚀"
+    text = "🤖 **AI STOCK ASSISTANT v3.2 (Bug Fixed)**\n\nक्रैश बग और लाइव रेट एरर पूरी तरह ठीक कर दिए गए हैं! नीचे दिए बटन्स का उपयोग करें। 🚀"
     keyboard = [
         [InlineKeyboardButton("📊 Screener Analysis", callback_data='help_analysis'), InlineKeyboardButton("⚡ Technicals (DMA)", callback_data='help_technicals')],
         [InlineKeyboardButton("➕ Add Stock / ISIN", callback_data='help_add'), InlineKeyboardButton("❌ Remove Stock", callback_data='help_remove')],
@@ -72,7 +80,7 @@ async def analyze_stock_data(update: Update, ticker: str, user_id: int):
     resolved = resolve_isin_to_ticker(ticker)
     symbol = f"{resolved}.NS" if not (resolved.endswith(".NS") or resolved.endswith(".BO")) else resolved
     
-    await msg.reply_text(f"⏳ **{resolved}** का एडवांस Screener डेटा निकाला जा रहा है...")
+    await msg.reply_text(f"⏳ **{resolved}** का एडवांस डेटा निकाला जा रहा है...")
     try:
         stock = yf.Ticker(symbol)
         info = stock.info
@@ -84,14 +92,13 @@ async def analyze_stock_data(update: Update, ticker: str, user_id: int):
         debt_to_equity = info.get('debtToEquity', "N/A")
         if isinstance(debt_to_equity, (int, float)): debt_to_equity = f"{debt_to_equity / 100:.2f}"
 
-        hist = stock.history(period="5d")  # वीकेंड सेफ विंडो
+        hist = stock.history(period="5d")
         if hist.empty or len(hist) < 1:
             d50, d200, sig, price = "N/A", "N/A", "N/A", 0.0
         else:
             cp = hist['Close']
             price = cp.iloc[-1]
             
-            # पूर्ण 1 साल का डेटा सिर्फ DMA के लिए निकालें
             full_hist = stock.history(period="1y")
             if not full_hist.empty and len(full_hist) >= 200:
                 f_cp = full_hist['Close']
@@ -103,7 +110,7 @@ async def analyze_stock_data(update: Update, ticker: str, user_id: int):
                 d50_str, d200_str, sig = "कम डेटा है", "कम डेटा है", "N/A"
         
         clean_tv = resolved.replace(".BO", "").replace(".NS", "")
-        tradingview_link = f"https://www.tradingview.com/symbols/NSE-{clean_tv}/"
+        tradingview_link = f"https://www.tradingview.com/symbols/BSE-{clean_tv}/" if resolved.endswith(".BO") else f"https://www.tradingview.com/symbols/NSE-{clean_tv}/"
 
         res = f"📊 **SCREENER ANALYSIS: {name}**\n"
         res += f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -120,7 +127,7 @@ async def analyze_stock_data(update: Update, ticker: str, user_id: int):
         res += f"🔗 [TradingView Live Chart]({tradingview_link})\n"
         await msg.reply_text(res, parse_mode="Markdown", disable_web_page_preview=True)
     except Exception as e:
-        await msg.reply_text(f"❌ एनालिसिस एरर: सही सिंबल चेक करें।")
+        await msg.reply_text(f"❌ एनालिसिस एरर: कृपया सही सिंबल चेक करें।")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -172,10 +179,8 @@ async def show_watchlist_logic(update: Update, user_id: int):
         try:
             stock = yf.Ticker(symbol)
             info = stock.info
-            # कोड की जगह कंपनी का असली नाम दिखाना
             company_name = info.get('longName', ticker)
             
-            # वीकेंड/हॉलिडे सेफ प्राइस फेचिंग रणनीति
             price = info.get('currentPrice') or info.get('regularMarketPrice')
             if not price:
                 hist = stock.history(period="5d")
@@ -183,7 +188,7 @@ async def show_watchlist_logic(update: Update, user_id: int):
             
             price_str = f"₹{price:.2f}" if price else "N/A"
             res += f"🔹 **{company_name}**: {price_str}\n"
-        except:
+        except Exception as e:
             res += f"🔹 **{ticker}**: Error\n"
             
     await msg.reply_text(res, parse_mode="Markdown")
@@ -192,16 +197,35 @@ async def remove_from_watchlist(update: Update, context: ContextTypes.DEFAULT_TY
     if not context.args: return
     user_id = update.effective_user.id
     ticker = context.args[0].upper()
+    
+    # इनपुट क्लीनिंग ताकि ISIN या गलत नाम डालने पर भी डिलीट हो सके
     if "PROFINC.BO" in ticker: ticker = "511557.BO"
+    if "INE0PQ601019" in ticker or "BALAJIPHOS" in ticker: ticker = "530299.BO"
     
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("DELETE FROM watchlist WHERE user_id = ? AND stock_symbol = ?", (user_id, ticker))
-    changes = c.total_changes
-    conn.commit()
-    conn.close()
-    if changes > 0: await update.message.reply_text(f"❌ **{ticker}** को हटा दिया गया है।")
-    else: await update.message.reply_text("ℹ️ स्टॉक वॉचलिस्ट में नहीं मिला।")
+    try:
+        c.execute("DELETE FROM watchlist WHERE user_id = ? AND stock_symbol = ?", (user_id, ticker))
+        # क्रैश बग फिक्स: c.total_changes को बदलकर conn.total_changes किया
+        changes = conn.total_changes
+        conn.commit()
+        if changes > 0: 
+            await update.message.reply_text(f"❌ **{ticker}** को वॉचलिस्ट से हटा दिया गया है।", parse_mode="Markdown")
+        else: 
+            # अगर सीधे नाम मैच नहीं हुआ तो बैकग्राउंड रिजॉल्व करके डिलीट मारें
+            resolved_ticker = resolve_isin_to_ticker(ticker)
+            c.execute("DELETE FROM watchlist WHERE user_id = ? AND stock_symbol = ?", (user_id, resolved_ticker))
+            changes_retry = conn.total_changes
+            conn.commit()
+            if changes_retry > 0:
+                await update.message.reply_text(f"❌ **{resolved_ticker}** को हटा दिया गया है।", parse_mode="Markdown")
+            else:
+                await update.message.reply_text("ℹ️ स्टॉक वॉचलिस्ट में नहीं मिला।")
+    except Exception as e:
+        logging.error(f"Remove Error: {e}")
+        await update.message.reply_text("❌ हटाने के दौरान कोई एरर आया।")
+    finally: 
+        conn.close()
 
 def main():
     init_db()
@@ -209,9 +233,10 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("analyze", run_analyze_command))
     app.add_handler(CommandHandler("add", add_to_watchlist))
-    app.add_handler(CommandHandler("watchlist", view_watchlist := view_watchlist if 'view_watchlist' in locals() else (lambda u, c: show_watchlist_logic(u, u.effective_user.id))))
+    app.add_handler(CommandHandler("watchlist", lambda u, c: show_watchlist_logic(u, u.effective_user.id)))
     app.add_handler(CommandHandler("remove", remove_from_watchlist))
     app.add_handler(CallbackQueryHandler(button_handler))
+    print("🤖 Starting AI Stock Assistant v3.2...")
     threading.Thread(target=run_dummy_server, daemon=True).start()
     app.run_polling(drop_pending_updates=True)
 
