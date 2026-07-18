@@ -1,7 +1,12 @@
-BOT_TOKEN = "8875474288:AAFpAGBjS-gqgc3KY-MZ7qWzrQorPLmsmB8"
+import os
 
-CHAT_ID = ""
+# Telegram Bot Token
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-REPORT_TIME = "23:00"
+# Check if token is available
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN environment variable not found!")
 
-MORNING_REPORT_TIME = "08:30"
+# Optional Settings
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+DEBUG = os.getenv("DEBUG", "False").lower() == "true"
