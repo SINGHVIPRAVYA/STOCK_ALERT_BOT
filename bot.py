@@ -4,18 +4,18 @@ import threading
 import sqlite3
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import yfinance as yf
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from config import BOT_TOKEN
 
-# लॉगर सेटअप (ताकि Render logs में सब दिखे)
+# लॉगर सेटअप
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
 DB_NAME = "watchlist.db"
 
-# === 1. SQLite डेटाबेस सेटअप ===
+# === SQLite डेटाबेस सेटअप ===
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -29,7 +29,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# === 2. Render Health Check डमी सर्वर ===
+# === Render Health Check डमी सर्वर ===
 class DummyServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -38,26 +38,43 @@ class DummyServer(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot is running flawlessly on Render!")
 
 def run_dummy_server():
-    # Render खुद एक PORT वेरिएबल देता है, नहीं तो 10000 यूज़ होगा
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), DummyServer)
-    print(f"🌍 Dummy Port Server active on port {port}")
     server.serve_forever()
 
-# === 3. टेलीग्राम बोट कमांड्स ===
+# === टेलीग्राम बोट कमांड्स ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = """
 🤖 **AI STOCK ASSISTANT (FREE)**
 
-बोट पूरी तरह चालू है! 🔥
-
-📌 **कमांड्स कैसे यूज़ करें:**
-📈 लाइव भाव: `/price STOCK` (उदा: `/price SBIN`)
-➕ वॉचलिस्ट में जोड़ें: `/add STOCK` (उदा: `/add TATAMOTORS`)
-📋 वॉचलिस्ट देखें: `/watchlist`
-❌ वॉचलिस्ट से हटाएं: `/remove STOCK`
+बोट पूरी तरह चालू है! नीचे दिए गए बटन्स का यूज़ करें या डायरेक्ट कमांड टाइप करें। 🔥
 """
-    await update.message.reply_text(text, parse_mode="Markdown")
+    # यहाँ हम इनलाइन बटन का लेआउट बना रहे हैं
+    keyboard = [
+        [InlineKeyboardButton("📋 अपनी वॉचलिस्ट देखें (Watchlist)", callback_data='view_wl')],
+        [InlineKeyboardButton("📈 लाइव भाव कैसे देखें?", callback_data='help_price')],
+        [InlineKeyboardButton("➕ स्टॉक कैसे जोड़ें?", callback_data='help_add')],
+        [InlineKeyboardButton("❌ स्टॉक कैसे हटाएं?", callback_data='help_remove')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+# === बटन क्लिक को हैंडल करने का लॉजिक ===
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer() # बटन क्लिक को एकनॉलेज करना ज़रूरी है ताकि लोडिंग हटे
+    
+    user_id = update.effective_user.id
+    
+    if query.data == 'view_wl':
+        # बटन दबाते ही सीधे वॉचलिस्ट डेटाबेस से निकाल कर दिखाएगा
+        await show_watchlist_logic(update, user_id)
+    elif query.data == 'help_price':
+        await query.message.reply_text("📈 **लाइव भाव देखने के लिए:**\nटाइप करें: `/price STOCK` (उदा: `/price SBIN`)", parse_mode="Markdown")
+    elif query.data == 'help_add':
+        await query.message.reply_text("➕ **वॉचलिस्ट में जोड़ने के लिए:**\nटाइप करें: `/add STOCK` (उदा: `/add TATAMOTORS`)", parse_mode="Markdown")
+    elif query.data == 'help_remove':
+        await query.message.reply_text("❌ **वॉचलिस्ट से हटाने के लिए:**\nटाइप करें: `/remove STOCK` (उदा: `/remove SBIN`)", parse_mode="Markdown")
 
 # लाइव भाव देखने का लॉजिक
 async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -76,7 +93,7 @@ async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         live_price = todays_data['Close'].iloc[-1]
         await update.message.reply_text(f"📊 **{ticker}**\n💰 **लाइव भाव:** ₹{live_price:.2f}", parse_mode="Markdown")
-    except Exception as e:
+    except:
         await update.message.reply_text("❌ डेटा फेच करने में एरर आया।")
 
 # वॉचलिस्ट में स्टॉक जोड़ने का लॉजिक
@@ -84,7 +101,7 @@ async def add_to_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ कृपया स्टॉक नाम दें। उदा: `/add SBIN`")
         return
-    user_id = update.message.from_user.id
+    user_id = update.effective_user.id
     ticker = context.args[0].upper()
     
     conn = sqlite3.connect(DB_NAME)
@@ -98,20 +115,27 @@ async def add_to_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         conn.close()
 
-# वॉचलिस्ट देखने का लॉजिक
+# कमांड के ज़रिए वॉचलिस्ट देखना
 async def view_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+    user_id = update.effective_user.id
+    await show_watchlist_logic(update, user_id)
+
+# कॉमन फंक्शन जो बटन और कमांड दोनों जगह काम करेगा
+async def show_watchlist_logic(update: Update, user_id: int):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT stock_symbol FROM watchlist WHERE user_id = ?", (user_id,))
     rows = cursor.fetchall()
     conn.close()
 
+    # अगर बटन से रिक्वेस्ट आई है तो query.message यूज़ होगा, नहीं तो normal message
+    msg_source = update.callback_query.message if update.callback_query else update.message
+
     if not rows:
-        await update.message.reply_text("📋 आपकी वॉचलिस्ट अभी खाली है। स्टॉक जोड़ने के लिए `/add STOCK_NAME` टाइप करें।")
+        await msg_source.reply_text("📋 आपकी वॉचलिस्ट अभी खाली है। स्टॉक जोड़ने के लिए `/add STOCK_NAME` टाइप करें।")
         return
 
-    await update.message.reply_text("🔄 वॉचलिस्ट के स्टॉक्स का लाइव भाव निकाला जा रहा है...")
+    await msg_source.reply_text("🔄 वॉचलिस्ट के स्टॉक्स का लाइव भाव निकाला जा रहा है...")
     
     response_text = "📋 **आपकी पर्सनल वॉचलिस्ट:**\n\n"
     for row in rows:
@@ -125,14 +149,14 @@ async def view_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
             price_str = "Error"
         response_text += f"🔹 **{ticker}**: {price_str}\n"
 
-    await update.message.reply_text(response_text, parse_mode="Markdown")
+    await msg_source.reply_text(response_text, parse_mode="Markdown")
 
 # वॉचलिस्ट से स्टॉक हटाने का लॉजिक
 async def remove_from_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ कृपया स्टॉक नाम दें। उदा: `/remove SBIN`")
         return
-    user_id = update.message.from_user.id
+    user_id = update.effective_user.id
     ticker = context.args[0].upper()
 
     conn = sqlite3.connect(DB_NAME)
@@ -147,24 +171,23 @@ async def remove_from_watchlist(update: Update, context: ContextTypes.DEFAULT_TY
     else:
         await update.message.reply_text(f"ℹ️ {ticker} आपकी वॉचलिस्ट में नहीं मिला।")
 
-# === 4. मेन फंक्शन ===
+# === मेन फंक्शन ===
 def main():
-    init_db()  # डेटाबेस टेबल बनाना
+    init_db()
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # कमांड्स को रजिस्टर करना
+    # कमांड्स रजिस्टर्ड
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("price", get_price))
     app.add_handler(CommandHandler("add", add_to_watchlist))
     app.add_handler(CommandHandler("watchlist", view_watchlist))
     app.add_handler(CommandHandler("remove", remove_from_watchlist))
+    
+    # बटन्स के क्लिक को सुनने के लिए Handler जोड़ा
+    app.add_handler(CallbackQueryHandler(button_handler))
 
-    print("🤖 Starting Telegram Bot...")
-    
-    # Render को खुश करने के लिए बैकग्राउंड थ्रेड में नकली सर्वर चलाना
+    print("🤖 Starting Telegram Bot with Interactive Buttons...")
     threading.Thread(target=run_dummy_server, daemon=True).start()
-    
-    # टेलीग्राम पोलिंग शुरू करना
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
