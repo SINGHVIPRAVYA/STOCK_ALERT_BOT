@@ -12,13 +12,13 @@ from config import BOT_TOKEN
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 DB_NAME = "watchlist.db"
 
-# === 1. मास्टर मैनुअल ISIN मैपिंग (सटीक NSE सिंबल के साथ फिक्स) ===
+# === 1. मास्टर मैनुअल ISIN मैपिंग ===
 MANUAL_ISIN_MAPPING = {
     "INE732K01027": "511557.BO",       # प्रो-फिन कैपिटल (BSE)
-    "INE0PQ601019": "BALAJIPHOS.NS",   # बालाजी फॉस्फेट्स (NSE पर असली सिंबल - FIXED! 🚀)
+    "INE0PQ601019": "BALAJIPHOS.NS",   # बालाजी फॉस्फेट्स (NSE)
 }
 
-# === 2. गूगल फाइनेंस बाईपास इंजन ===
+# === 2. गूगल फाइनेंस बाईपास इंजन (डायनेमिक क्लास फिक्स के साथ) ===
 def fetch_live_price_google(ticker):
     target = ticker.strip().upper()
     if target.endswith(".NS"):
@@ -38,8 +38,9 @@ def fetch_live_price_google(ticker):
         res = requests.get(url, headers=headers, cookies=cookies, timeout=5)
         if res.status_code == 200:
             html = res.text
-            price_match = re.search(r'class="YMlKec fxKbKc">([^<]+)', html)
-            name_match = re.search(r'class="ZZ33Fa">([^<]+)', html)
+            # [FIXED] अब यह गूगल की डायनेमिक क्लास (YMlKec के आगे कुछ भी हो) को आसानी से पार्स कर लेगा
+            price_match = re.search(r'class="[^"]*YMlKec[^"]*">([^<]+)', html)
+            name_match = re.search(r'class="[^"]*ZZ33Fa[^"]*">([^<]+)', html)
             
             if price_match:
                 price_raw = price_match.group(1).replace("₹", "").replace(",", "").strip()
@@ -99,7 +100,7 @@ class DummyServer(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bot is online with exact tickers mapped.")
+        self.wfile.write(b"Bot is online on Dynamic Regex Engine v6.3")
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 10000))
@@ -107,7 +108,7 @@ def run_dummy_server():
     server.serve_forever()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "🤖 **AI STOCK ASSISTANT v6.2 (Exact Ticker Core)**\n\nअब बालाजी फॉस्फेट्स का सटीक सिंबल `BALAJIPHOS` मैप कर दिया गया है! 🚀"
+    text = "🤖 **AI STOCK ASSISTANT v6.3 (Dynamic Regex Core)**\n\nगूगल के नए लेआउट/क्लास चेंजेस को बाईपास कर दिया गया है! अब NTPC और बाकी सभी हैवी स्टॉक्स परफेक्ट काम करेंगे। 🚀"
     keyboard = [
         [InlineKeyboardButton("📊 Screener Analysis", callback_data='help_analysis'), InlineKeyboardButton("⚡ Technicals (DMA)", callback_data='help_technicals')],
         [InlineKeyboardButton("➕ Add Stock / ISIN", callback_data='help_add'), InlineKeyboardButton("❌ Remove Stock", callback_data='help_remove')],
@@ -241,7 +242,7 @@ def main():
     app.add_handler(CommandHandler("watchlist", lambda u, c: show_watchlist_logic(u, u.effective_user.id)))
     app.add_handler(CommandHandler("remove", remove_from_watchlist))
     app.add_handler(CallbackQueryHandler(button_handler))
-    print("🤖 Starting AI Stock Assistant v6.2 (Exact Ticker Core)...")
+    print("🤖 Starting AI Stock Assistant v6.3 (Dynamic Regex Core)...")
     threading.Thread(target=run_dummy_server, daemon=True).start()
     app.run_polling(drop_pending_updates=True)
 
