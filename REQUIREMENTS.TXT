@@ -1,0 +1,7 @@
+python-telegram-bot==21.0.1
+requests
+pandas
+schedule
+beautifulsoup4
+lxml
+yfinance
