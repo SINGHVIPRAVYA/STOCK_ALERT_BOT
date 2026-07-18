@@ -4,6 +4,7 @@ import threading
 import sqlite3
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import yfinance as yf
+import pandas as pd  # DMA कैलकुलेट करने के लिए
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from config import BOT_TOKEN
@@ -15,7 +16,7 @@ logging.basicConfig(
 
 DB_NAME = "watchlist.db"
 
-# === SQLite डेटाबेस सेटअप ===
+# === 1. SQLite डेटाबेस सेटअप ===
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -29,7 +30,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# === Render Health Check डमी सर्वर ===
+# === 2. Render Health Check डमी सर्वर ===
 class DummyServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -42,61 +43,127 @@ def run_dummy_server():
     server = HTTPServer(("0.0.0.0", port), DummyServer)
     server.serve_forever()
 
-# === टेलीग्राम बोट कमांड्स ===
+# === 3. टेलीग्राम कमांड्स ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = """
-🤖 **AI STOCK ASSISTANT (FREE)**
+🤖 **AI STOCK ASSISTANT v2.0**
 
-बोट पूरी तरह चालू है! नीचे दिए गए बटन्स का यूज़ करें या डायरेक्ट कमांड टाइप करें। 🔥
+बोट पूरी तरह अपग्रेड हो चुका है! नीचे दिए गए बटन्स का उपयोग करें। 🚀
 """
-    # यहाँ हम इनलाइन बटन का लेआउट बना रहे हैं
     keyboard = [
-        [InlineKeyboardButton("📋 अपनी वॉचलिस्ट देखें (Watchlist)", callback_data='view_wl')],
-        [InlineKeyboardButton("📈 लाइव भाव कैसे देखें?", callback_data='help_price')],
-        [InlineKeyboardButton("➕ स्टॉक कैसे जोड़ें?", callback_data='help_add')],
-        [InlineKeyboardButton("❌ स्टॉक कैसे हटाएं?", callback_data='help_remove')]
+        [
+            InlineKeyboardButton("📊 Screener Analysis", callback_data='help_analysis'),
+            InlineKeyboardButton("⚡ Technicals (DMA)", callback_data='help_technicals')
+        ],
+        [
+            InlineKeyboardButton("➕ Add Stock", callback_data='help_add'),
+            InlineKeyboardButton("❌ Remove Stock", callback_data='help_remove')
+        ],
+        [
+            InlineKeyboardButton("📋 Watchlist देखें", callback_data='view_wl')
+        ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
-# === बटन क्लिक को हैंडल करने का लॉजिक ===
+# === 4. एडवांस स्टॉक एनालिसिस इंजन (Screener.in स्टाइल + 50/200 DMA) ===
+async def analyze_stock_data(update: Update, ticker: str, user_id: int):
+    # स्टॉक का सही सिंबल सेट करें (.NS भारतीय मार्केट के लिए)
+    symbol = f"{ticker}.NS" if not (ticker.endswith(".NS") or ticker.endswith(".BO")) else ticker
+    msg_source = update.callback_query.message if update.callback_query else update.message
+
+    await msg_source.reply_text(f"⏳ **{ticker}** का 'Screener' एनालिसिस और DMA डेटा निकाला जा रहा है...")
+
+    try:
+        # yfinance से डेटा फेच करें
+        stock = yf.Ticker(symbol)
+        
+        # 1. फंडामेंटल डेटा (Screener.in स्टाइल)
+        info = stock.info
+        company_name = info.get('longName', ticker)
+        market_cap_raw = info.get('marketCap', 0)
+        market_cap_cr = market_cap_raw / 10000000 if market_cap_raw else 0  # Crores में बदलने के लिए
+        pe_ratio = info.get('trailingPE', "N/A")
+        if isinstance(pe_ratio, (int, float)):
+            pe_ratio = f"{pe_ratio:.2f}"
+        div_yield = info.get('dividendYield', 0) * 100 if info.get('dividendYield') else 0
+        debt_to_equity = info.get('debtToEquity', "N/A")
+        if isinstance(debt_to_equity, (int, float)):
+            debt_to_equity = f"{debt_to_equity / 100:.2f}" # Ratio फॉर्मेट में
+        
+        # 2. टेक्निकल डेटा (50 DMA & 200 DMA कैलकुलेशन)
+        hist = stock.history(period="1y") # 1 साल का डेटा DMA निकालने के लिए
+        if hist.empty or len(hist) < 200:
+            dma_50_str = "कम डेटा है"
+            dma_200_str = "कम डेटा है"
+            signal = "N/A"
+        else:
+            close_prices = hist['Close']
+            dma_50 = close_prices.rolling(window=50).mean().iloc[-1]
+            dma_200 = close_prices.rolling(window=200).mean().iloc[-1]
+            current_price = close_prices.iloc[-1]
+            
+            dma_50_str = f"₹{dma_50:.2f}"
+            dma_200_str = f"₹{dma_200:.2f}"
+            
+            # Crossover/Trend Signal
+            if current_price > dma_50 and dma_50 > dma_200:
+                signal = "🟢 **Super Bullish (Golden Trend)**"
+            elif current_price < dma_50 and dma_50 < dma_200:
+                signal = "🔴 **Bearish Trend**"
+            else:
+                signal = "🟡 **Consolidating (Sideways)**"
+
+        # 3. TradingView चार्ट लिंक बनाना
+        tradingview_link = f"https://www.tradingview.com/symbols/NSE-{ticker}/"
+
+        # 4. सुंदर रिप्लाई मैसेज तैयार करना
+        response_text = f"📊 **SCREENER ANALYSIS: {company_name}**\n"
+        response_text += f"━━━━━━━━━━━━━━━━━━━━\n"
+        response_text += f"💰 **करंट प्राइस:** ₹{close_prices.iloc[-1]:.2f}\n"
+        response_text += f"🏢 **मार्केट कैप:** ₹{market_cap_cr:,.2f} Cr\n"
+        response_text += f"🎯 **स्टॉक P/E:** {pe_ratio}\n"
+        response_text += f"💸 **डिविडेंड यील्ड:** {div_yield:.2f}%\n"
+        response_text += f"⚖️ **Debt to Equity:** {debt_to_equity}\n"
+        response_text += f"━━━━━━━━━━━━━━━━━━━━\n"
+        response_text += f"📈 **50 DMA (Moving Average):** {dma_50_str}\n"
+        response_text += f"📉 **200 DMA (Moving Average):** {dma_200_str}\n"
+        response_text += f"⚡ **चार्ट सिग्नल:** {signal}\n"
+        response_text += f"━━━━━━━━━━━━━━━━━━━━\n"
+        response_text += f"🔗 [TradingView Live Chart Link]({tradingview_link})\n"
+
+        await msg_source.reply_text(response_text, parse_mode="Markdown", disable_web_page_preview=True)
+
+    except Exception as e:
+        logging.error(f"Analysis Error: {e}")
+        await msg_source.reply_text("❌ स्टॉक एनालिसिस करने में एरर आया। कृपया सही सिंबल चेक करें।")
+
+# === 5. बटन और कमांड हैंडलर ===
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer() # बटन क्लिक को एकनॉलेज करना ज़रूरी है ताकि लोडिंग हटे
+    await query.answer()
     
     user_id = update.effective_user.id
     
     if query.data == 'view_wl':
-        # बटन दबाते ही सीधे वॉचलिस्ट डेटाबेस से निकाल कर दिखाएगा
         await show_watchlist_logic(update, user_id)
-    elif query.data == 'help_price':
-        await query.message.reply_text("📈 **लाइव भाव देखने के लिए:**\nटाइप करें: `/price STOCK` (उदा: `/price SBIN`)", parse_mode="Markdown")
+    elif query.data == 'help_analysis':
+        await query.message.reply_text("📊 **Screener-Style एनालिसिस के लिए:**\nटाइप करें: `/analyze STOCK` (उदा: `/analyze SBIN` या `/analyze RELIANCE`)", parse_mode="Markdown")
+    elif query.data == 'help_technicals':
+        await query.message.reply_text("⚡ **Technicals (50/200 DMA) देखने के लिए:**\nटाइप करें: `/analyze STOCK` लिखें। बोट आपको फंडामेंटल्स के साथ-साथ Moving Average और चार्ट सिग्नल एक साथ निकाल कर देगा!", parse_mode="Markdown")
     elif query.data == 'help_add':
         await query.message.reply_text("➕ **वॉचलिस्ट में जोड़ने के लिए:**\nटाइप करें: `/add STOCK` (उदा: `/add TATAMOTORS`)", parse_mode="Markdown")
     elif query.data == 'help_remove':
         await query.message.reply_text("❌ **वॉचलिस्ट से हटाने के लिए:**\nटाइप करें: `/remove STOCK` (उदा: `/remove SBIN`)", parse_mode="Markdown")
 
-# लाइव भाव देखने का लॉजिक
-async def get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# कमांड हैंडलर्स
+async def run_analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("❌ कृपया स्टॉक का नाम लिखें। उदा: `/price SBIN`")
+        await update.message.reply_text("❌ कृपया स्टॉक का नाम लिखें। उदा: `/analyze SBIN`")
         return
     ticker = context.args[0].upper()
-    symbol = f"{ticker}.NS" if not (ticker.endswith(".NS") or ticker.endswith(".BO")) else ticker
-    
-    await update.message.reply_text(f"🔍 {ticker} का भाव निकाला जा रहा है...")
-    try:
-        stock = yf.Ticker(symbol)
-        todays_data = stock.history(period="1d")
-        if todays_data.empty:
-            await update.message.reply_text(f"❌ '{ticker}' का डेटा नहीं मिला। सही सिंबल डालें।")
-            return
-        live_price = todays_data['Close'].iloc[-1]
-        await update.message.reply_text(f"📊 **{ticker}**\n💰 **लाइव भाव:** ₹{live_price:.2f}", parse_mode="Markdown")
-    except:
-        await update.message.reply_text("❌ डेटा फेच करने में एरर आया।")
+    await analyze_stock_data(update, ticker, update.effective_user.id)
 
-# वॉचलिस्ट में स्टॉक जोड़ने का लॉजिक
 async def add_to_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ कृपया स्टॉक नाम दें। उदा: `/add SBIN`")
@@ -109,18 +176,16 @@ async def add_to_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         cursor.execute("INSERT INTO watchlist (user_id, stock_symbol) VALUES (?, ?)", (user_id, ticker))
         conn.commit()
-        await update.message.reply_text(f"✅ **{ticker}** को आपकी वॉचलिस्ट में जोड़ दिया गया है।", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ **{ticker}** आपकी वॉचलिस्ट में जुड़ गया है। इसे देखने के लिए नीचे बटन दबाएं या `/watchlist` टाइप करें।", parse_mode="Markdown")
     except sqlite3.IntegrityError:
         await update.message.reply_text(f"ℹ️ {ticker} पहले से ही आपकी वॉचलिस्ट में है।")
     finally:
         conn.close()
 
-# कमांड के ज़रिए वॉचलिस्ट देखना
 async def view_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await show_watchlist_logic(update, user_id)
 
-# कॉमन फंक्शन जो बटन और कमांड दोनों जगह काम करेगा
 async def show_watchlist_logic(update: Update, user_id: int):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -128,7 +193,6 @@ async def show_watchlist_logic(update: Update, user_id: int):
     rows = cursor.fetchall()
     conn.close()
 
-    # अगर बटन से रिक्वेस्ट आई है तो query.message यूज़ होगा, नहीं तो normal message
     msg_source = update.callback_query.message if update.callback_query else update.message
 
     if not rows:
@@ -151,7 +215,6 @@ async def show_watchlist_logic(update: Update, user_id: int):
 
     await msg_source.reply_text(response_text, parse_mode="Markdown")
 
-# वॉचलिस्ट से स्टॉक हटाने का लॉजिक
 async def remove_from_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ कृपया स्टॉक नाम दें। उदा: `/remove SBIN`")
@@ -171,22 +234,22 @@ async def remove_from_watchlist(update: Update, context: ContextTypes.DEFAULT_TY
     else:
         await update.message.reply_text(f"ℹ️ {ticker} आपकी वॉचलिस्ट में नहीं मिला।")
 
-# === मेन फंक्शन ===
+# === 6. मेन फंक्शन ===
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # कमांड्स रजिस्टर्ड
+    # कमांड्स रजिस्टर करें
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("price", get_price))
+    app.add_handler(CommandHandler("analyze", run_analyze_command))
     app.add_handler(CommandHandler("add", add_to_watchlist))
     app.add_handler(CommandHandler("watchlist", view_watchlist))
     app.add_handler(CommandHandler("remove", remove_from_watchlist))
     
-    # बटन्स के क्लिक को सुनने के लिए Handler जोड़ा
+    # बटन्स क्लिक हैंडल करने के लिए
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    print("🤖 Starting Telegram Bot with Interactive Buttons...")
+    print("🤖 Starting AI Stock Assistant v2.0...")
     threading.Thread(target=run_dummy_server, daemon=True).start()
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
