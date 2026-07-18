@@ -1,7 +1,2 @@
-python-telegram-bot==22.2
-requests
-pandas
-schedule
-beautifulsoup4
-lxml
-yfinance
+python-telegram-bot==21.10
+yfinance==0.2.54
