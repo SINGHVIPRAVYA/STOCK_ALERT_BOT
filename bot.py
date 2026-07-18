@@ -1,8 +1,23 @@
 import os
+import logging
+
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+)
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN not found! Add BOT_TOKEN in Environment Variables.")
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = """
@@ -20,24 +35,4 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📉 Support & Resistance
 📈 20/50/100/200 DMA
 📐 Chart Pattern Detection
-🔥 Breakout Alerts
-🌅 Morning Report
-🌙 Night Report
-⭐ Unlimited Watchlist
-⚙️ Settings Menu
-
-Bot is Online ✅
-"""
-    await update.message.reply_text(text)
-
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-
-    print("Bot Started Successfully...")
-
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+🔥 Breakout
