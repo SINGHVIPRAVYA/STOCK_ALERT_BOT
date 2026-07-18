@@ -3,9 +3,7 @@ import logging
 import threading
 import sqlite3
 import requests
-import re  # गूगल फाइनेंस का डेटा पार्स करने के लिए
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import yfinance as yf  # सिर्फ 50/200 DMA के इतिहास के लिए बैकअप में रखा है
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from config import BOT_TOKEN
@@ -19,40 +17,48 @@ MANUAL_ISIN_MAPPING = {
     "INE0PQ601019": "530299.BO",      # बालाजी फॉस्फेट्स
 }
 
-# === 2. याहू की जगह गूगल फाइनेंस से लाइव रेट निकालने का इंजन ===
-def fetch_from_google_finance(ticker):
-    target = ticker.strip().upper()
-    
-    # याहू फॉर्मेट को गूगल फॉर्मेट में बदलें (.NS -> :NSE, .BO -> :BSE)
-    if target.endswith(".NS"):
-        g_ticker = target.replace(".NS", ":NSE")
-    elif target.endswith(".BO"):
-        g_ticker = target.replace(".BO", ":BSE")
-    else:
-        g_ticker = f"{target}:NSE"
-        
-    url = f"https://www.google.com/finance/quote/{g_ticker}"
+# === 2. अल्टीमेट क्रम्बलेस JSON API प्राइस इंजन ===
+def fetch_stock_data_json(symbol, timeframe="1y"):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range={timeframe}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    
     try:
         res = requests.get(url, headers=headers, timeout=5)
         if res.status_code == 200:
-            html = res.text
-            # रेगुलर एक्सप्रेशन से लाइव प्राइस और कंपनी का नाम निकालना
-            price_match = re.search(r'class="YMlKec fxKbKc">([^<]+)', html)
-            name_match = re.search(r'class="ZZ33Fa">([^<]+)', html)
+            data = res.json()
+            result = data.get("chart", {}).get("result", [{}])[0]
+            meta = result.get("meta", {})
             
-            if price_match:
-                price_raw = price_match.group(1).replace("₹", "").replace(",", "").strip()
-                price = float(price_raw)
-                name = name_match.group(1) if name_match else ticker
-                return {"name": name, "price": price, "success": True}
+            # क्लोजिंग प्राइस की लिस्ट निकालें और None वैल्यूज साफ करें
+            raw_prices = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+            clean_prices = [p for p in raw_prices if p is not None]
+            
+            # लाइव भाव ढूंढें
+            current_price = meta.get("regularMarketPrice")
+            if not current_price and clean_prices:
+                current_price = clean_prices[-1]
+                
+            if current_price:
+                return {"success": True, "price": current_price, "prices_list": clean_prices, "ticker": meta.get("symbol", symbol)}
     except Exception as e:
-        logging.error(f"Google Finance Error for {g_ticker}: {e}")
-        
-    return {"name": ticker, "price": None, "success": False}
+        logging.error(f"JSON API Error for {symbol}: {e}")
+    return {"success": False, "price": None, "prices_list": [], "ticker": symbol}
+
+# === 3. कंपनी का असली नाम खोजने वाला इंजन ===
+def fetch_company_name(ticker):
+    url = f"https://query2.finance.yahoo.com/v1/finance/search?q={ticker}&quotesCount=1&newsCount=0"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            quotes = data.get("quotes", [])
+            if quotes:
+                return quotes[0].get("longname") or quotes[0].get("shortname") or ticker
+    except:
+        pass
+    return ticker
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -67,7 +73,6 @@ def resolve_isin_to_ticker(symbol_or_isin):
         return MANUAL_ISIN_MAPPING[target]
         
     if len(target) == 12 and target.startswith("INE"):
-        # इसे भी गूगल सर्च या बैकअप से निकाला जा सकता है, अभी के लिए याहू सर्च एपीआई बैकअप हेडर्स के साथ
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={target}&quotesCount=3&newsCount=0"
         headers = {"User-Agent": "Mozilla/5.0"}
         try:
@@ -90,7 +95,7 @@ class DummyServer(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bot is active and running on Google Finance Engine.")
+        self.wfile.write(b"Bot is online on Ultimate Bulletproof JSON Engine.")
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 10000))
@@ -98,7 +103,7 @@ def run_dummy_server():
     server.serve_forever()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "🤖 **AI STOCK ASSISTANT v4.0 (Google Finance Core)**\n\nयाहू फाइनेंस को हटाकर मुख्य प्राइस इंजन को **गूगल फाइनेंस** पर शिफ्ट कर दिया गया है! अब रेट एरर कभी नहीं आएगा। 🚀"
+    text = "🤖 **AI STOCK ASSISTANT v5.1 (Fixed Variable Core)**\n\nसभी वेरिएबल एरर फिक्स कर दिए गए हैं! अब आपका बोट बिना किसी रुकावट के लाइव है। 🚀"
     keyboard = [
         [InlineKeyboardButton("📊 Screener Analysis", callback_data='help_analysis'), InlineKeyboardButton("⚡ Technicals (DMA)", callback_data='help_technicals')],
         [InlineKeyboardButton("➕ Add Stock / ISIN", callback_data='help_add'), InlineKeyboardButton("❌ Remove Stock", callback_data='help_remove')],
@@ -109,33 +114,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def analyze_stock_data(update: Update, ticker: str, user_id: int):
     msg = update.callback_query.message if update.callback_query else update.message
     resolved = resolve_isin_to_ticker(ticker)
+    symbol = f"{resolved}.NS" if not (resolved.endswith(".NS") or resolved.endswith(".BO")) else resolved
     
-    await msg.reply_text(f"⏳ **{resolved}** का Google + Technical डेटा निकाला जा रहा है...")
+    await msg.reply_text(f"⏳ **{resolved}** का एडवांस एनालिसिस लोड हो रहा है...")
     
-    # 1. लाइव भाव गूगल फाइनेंस से लाएं (100% सटीक)
-    g_data = fetch_from_google_finance(resolved)
-    if not g_data["success"] or g_data["price"] is None:
-        await msg.reply_text("❌ इस स्टॉक का लाइव डेटा गूगल फाइनेंस पर नहीं मिला।")
+    api_data = fetch_stock_data_json(symbol, "1y")
+    if not api_data["success"] or api_data["price"] is None:
+        await msg.reply_text("❌ इस स्टॉक का डेटा सर्वर पर नहीं मिल सका।")
         return
         
-    price = g_data["price"]
-    name = g_data["name"]
+    price = api_data["price"]
+    prices_list = api_data["prices_list"]
+    name = fetch_company_name(resolved)
     
-    # 2. टेक्निकल डेटा (DMA) के लिए इतिहास याहू से बैकअप की तरह लेंगे (जो कभी-कभार ही कॉल होता है)
-    symbol = f"{resolved}.NS" if not (resolved.endswith(".NS") or resolved.endswith(".BO")) else resolved
-    try:
-        stock = yf.Ticker(symbol)
-        full_hist = stock.history(period="1y")
-        if not full_hist.empty and len(full_hist) >= 200:
-            f_cp = full_hist['Close']
-            d50 = f_cp.rolling(50).mean().iloc[-1]
-            d200 = f_cp.rolling(200).mean().iloc[-1]
-            d50_str, d200_str = f"₹{d50:.2f}", f"₹{d200:.2f}"
-            sig = "🟢 **Super Bullish**" if price > d50 > d200 else "🔴 **Bearish**" if price < d50 < d200 else "🟡 **Sideways**"
-        else:
-            d50_str, d200_str, sig = "N/A", "N/A", "N/A"
-    except:
-        d50_str, d200_str, sig = "N/A", "N/A", "N/A"
+    # शुद्ध गणितीय DMA कैलकुलेशन (बिना किसी बाहरी लाइब्रेरी के भारी लोड के)
+    if len(prices_list) >= 200:
+        dma_50 = sum(prices_list[-50:]) / 50
+        dma_200 = sum(prices_list[-200:]) / 200
+        d50_str, d200_str = f"₹{dma_50:.2f}", f"₹{dma_200:.2f}"
+        sig = "🟢 **Super Bullish**" if price > dma_50 > dma_200 else "🔴 **Bearish**" if price < dma_50 < dma_200 else "🟡 **Sideways**"
+    else:
+        d50_str, d200_str, sig = "कम डेटा है", "कम डेटा है", "N/A"
 
     clean_tv = resolved.replace(".BO", "").replace(".NS", "")
     tradingview_link = f"https://www.tradingview.com/symbols/BSE-{clean_tv}/" if resolved.endswith(".BO") else f"https://www.tradingview.com/symbols/NSE-{clean_tv}/"
@@ -154,7 +153,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     if q.data == 'view_wl': await show_watchlist_logic(update, update.effective_user.id)
-    elif q.data == 'help_analysis': await q.message.reply_text("📊 टाइप करें: `/analyze STOCK` या `/analyze ISIN`")
+    elif q.data == 'help_analysis': await q.message.reply_text("📊 टाइप करें: `/analyze STOCK`")
     elif q.data == 'help_technicals': await q.message.reply_text("⚡ Technicals के लिए `/analyze` का उपयोग करें।")
     elif q.data == 'help_add': await q.message.reply_text("➕ टाइप करें: `/add STOCK` या सीधे ISIN")
     elif q.data == 'help_remove': await q.message.reply_text("❌ हटाने के लिए टाइप करें: `/remove STOCK`")
@@ -191,19 +190,19 @@ async def show_watchlist_logic(update: Update, user_id: int):
         await msg.reply_text("📋 आपकी वॉचलिस्ट अभी खाली है।")
         return
     
-    await msg.reply_text("🔄 गूगल फाइनेंस से लाइव भाव निकाला जा रहा है...")
-    res = "📋 **आपकी पर्सनल वॉचलिस्ट (Google Live):**\n\n"
+    await msg.reply_text("🔄 लाइव भाव निकाला जा रहा है...")
+    res = "📋 **आपकी पर्सनल वॉचलिस्ट (API Engine):**\n\n"
     
     for r in rows:
         db_ticker = r[0]
         resolved_ticker = resolve_isin_to_ticker(db_ticker)
+        symbol = f"{resolved_ticker}.NS" if not (resolved_ticker.endswith(".NS") or resolved_ticker.endswith(".BO")) else resolved_ticker
         
-        # गूगल से डेटा लाएं
-        g_data = fetch_from_google_finance(resolved_ticker)
+        api_data = fetch_stock_data_json(symbol, "5d")
         
-        if g_data["success"] and g_data["price"] is not None:
-            price_str = f"₹{g_data['price']:.2f}"
-            company_name = g_data["name"]
+        if api_data["success"] and api_data["price"] is not None:
+            price_str = f"₹{api_data['price']:.2f}"
+            company_name = fetch_company_name(resolved_ticker)
             res += f"🔹 **{company_name}**: {price_str}\n"
         else:
             res += f"🔹 **{resolved_ticker}**: Error\n"
@@ -240,7 +239,7 @@ def main():
     app.add_handler(CommandHandler("watchlist", lambda u, c: show_watchlist_logic(u, u.effective_user.id)))
     app.add_handler(CommandHandler("remove", remove_from_watchlist))
     app.add_handler(CallbackQueryHandler(button_handler))
-    print("🤖 Starting AI Stock Assistant v4.0 (Google Core)...")
+    print("🤖 Starting AI Stock Assistant v5.1 (Fixed Variable Core)...")
     threading.Thread(target=run_dummy_server, daemon=True).start()
     app.run_polling(drop_pending_updates=True)
 
