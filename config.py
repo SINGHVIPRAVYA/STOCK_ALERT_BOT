@@ -1,12 +1,7 @@
 import os
 
-# Telegram Bot Token
+# Render के Environment Variables से टोकन उठाएगा
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Check if token is available
 if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN environment variable not found!")
-
-# Optional Settings
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+    raise ValueError("❌ BOT_TOKEN missing! Please add it in Render Environment Variables.")
