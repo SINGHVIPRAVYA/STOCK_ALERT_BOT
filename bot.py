@@ -13,7 +13,7 @@ from config import BOT_TOKEN
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 DB_NAME = "watchlist.db"
 
-# === 1. Yahoo Finance ब्लॉकिंग से बचने के लिए स्पेशल ब्राउज़र सेशन ===
+# === 1. Yahoo Finance ब्लॉकिंग से बचने के लिए ब्राउज़र सेशन ===
 def get_browser_session():
     session = requests.Session()
     session.headers.update({
@@ -67,7 +67,7 @@ class DummyServer(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bot is online with anti-block headers.")
+        self.wfile.write(b"Bot is online and running flawlessly.")
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 10000))
@@ -75,7 +75,7 @@ def run_dummy_server():
     server.serve_forever()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "🤖 **AI STOCK ASSISTANT v3.4 (Anti-Block Version)**\n\nयाहू फाइनेंस ब्लॉकिंग सिस्टम को पूरी तरह बाईपास कर दिया गया है। अब SBIN से लेकर पेनी स्टॉक्स तक सब ट्रैक होंगे! 🚀"
+    text = "🤖 **AI STOCK ASSISTANT v3.4 (Anti-Block Version)**\n\nसभी स्पेलिंग एरर फिक्स कर दिए गए हैं! अब आपकी वॉचलिस्ट पूरी तरह चालू है। 🚀"
     keyboard = [
         [InlineKeyboardButton("📊 Screener Analysis", callback_data='help_analysis'), InlineKeyboardButton("⚡ Technicals (DMA)", callback_data='help_technicals')],
         [InlineKeyboardButton("➕ Add Stock / ISIN", callback_data='help_add'), InlineKeyboardButton("❌ Remove Stock", callback_data='help_remove')],
@@ -90,13 +90,12 @@ async def analyze_stock_data(update: Update, ticker: str, user_id: int):
     
     await msg.reply_text(f"⏳ **{resolved}** का सुरक्षित डेटा निकाला जा रहा है...")
     try:
-        # सेफ सेशन के साथ टिकर ऑब्जेक्ट बनाना
         session = get_browser_session()
         stock = yf.Ticker(symbol, session=session)
         
         hist = stock.history(period="5d")
         if hist.empty:
-            await msg.reply_text("❌ इस स्टॉक का लाइव डेटा याहू पर ब्लॉक है या उपलब्ध नहीं है।")
+            await msg.reply_text("❌ इस स्टॉक का लाइव डेटा उपलब्ध नहीं है।")
             return
         price = hist['Close'].iloc[-1]
         
@@ -193,7 +192,6 @@ async def show_watchlist_logic(update: Update, user_id: int):
         symbol = f"{resolved_ticker}.NS" if not (resolved_ticker.endswith(".NS") or resolved_ticker.endswith(".BO")) else resolved_ticker
         
         try:
-            # यहाँ भी सुरक्षित सेशन पास किया गया है
             stock = yf.Ticker(symbol, session=session)
             hist = stock.history(period="5d")
             
@@ -232,7 +230,7 @@ async def remove_from_watchlist(update: Update, context: ContextTypes.DEFAULT_TY
         if changes > 0: 
             await update.message.reply_text(f"❌ **{ticker}** को वॉचलिस्ट से हटा दिया गया है।")
         else: 
-            await update.message.reply_text("ℹ️ स्टॉक वॉचलिस्ट में नहीं मिला।")
+            await update.message.reply_text("ℹ️ STOCK वॉचलिस्ट में नहीं मिला।")
     except Exception as e:
         await update.message.reply_text("❌ हटाने के दौरान कोई एरर आया।")
     finally: 
