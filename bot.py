@@ -13,12 +13,30 @@ from config import BOT_TOKEN
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 DB_NAME = "watchlist.db"
 
+# === 1. मास्टर मैपिंग (पेनी स्टॉक्स के लिए विशेष रूप से अपडेटेड) ===
 MANUAL_ISIN_MAPPING = {
     "INE732K01027": "511557.BO",       # प्रो-फिन कैपिटल (BSE)
     "INE0PQ601019": "BALAJIPHOS.NS",   # बालाजी फॉस्फेट्स (NSE)
+    "INE138E01017": "CEDAR.BO",        # सीडर टेक्सटाइल्स (अगर BSE पर है, तो इसका सिंबल/ISIN यहाँ सेट कर सकते हैं)
 }
 
-# === 1. गूगल फाइनेंस इंजन (Thread Safe) ===
+# === 2. याहू फाइनेंस बैकअप इंजन (फॉर पेनी स्टॉक्स) ===
+def _fetch_yahoo_sync(ticker):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1m&range=1d"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        res = requests.get(url, headers=headers, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            meta = data.get("chart", {}).get("result", [{}])[0].get("meta", {})
+            price = meta.get("regularMarketPrice")
+            if price:
+                return {"success": True, "price": float(price), "name": ticker}
+    except Exception as e:
+        logging.error(f"Yahoo Fallback Error for {ticker}: {e}")
+    return {"success": False, "price": None, "name": ticker}
+
+# === 3. मुख्य गूगल फाइनेंस इंजन ===
 def _fetch_google_sync(ticker):
     target = ticker.strip().upper()
     if target.endswith(".NS"):
@@ -47,13 +65,15 @@ def _fetch_google_sync(ticker):
                 return {"success": True, "price": float(price_raw), "name": name_raw}
     except Exception as e:
         logging.error(f"Google Engine Error for {g_ticker}: {e}")
-    return {"success": False, "price": None, "name": ticker}
+    
+    # [FALLBACK] अगर गूगल फेल हुआ, तो तुरंत याहू से डेटा लाओ
+    logging.info(f"Google failed for {ticker}. Trying Yahoo Finance Fallback...")
+    return _fetch_yahoo_sync(ticker)
 
-async def fetch_live_price_google(ticker):
-    # ब्लॉकिंग नेटवर्क कॉल को अलग थ्रेड में चलाएं ताकि बोट अटके नहीं
+async def fetch_live_price(ticker):
     return await asyncio.to_thread(_fetch_google_sync, ticker)
 
-# === 2. बैकअप चार्ट एपीआई (Thread Safe) ===
+# === 4. टेक्निकल डेटा एपीआई ===
 def _fetch_dma_sync(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1y"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -109,7 +129,7 @@ class DummyServer(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bot is online on Async Core v6.4")
+        self.wfile.write(b"Bot is online on Ultra Hybrid Engine v6.5")
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 10000))
@@ -117,7 +137,7 @@ def run_dummy_server():
     server.serve_forever()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "🤖 **AI STOCK ASSISTANT v6.4 (Async Production Core)**\n\nसभी ब्लॉकिंग बग्स फिक्स कर दिए गए हैं। बोट अब सुपरफास्ट रिप्लाई करेगा! 🚀"
+    text = "🤖 **AI STOCK ASSISTANT v6.5 (Ultra Hybrid Core)**\n\nपेनी स्टॉक्स के लिए Dual-Engine एक्टिव कर दिया गया है! साथ ही Screener, Groww और Chartink के डायरेक्ट लिंक्स जोड़ दिए गए हैं। 🚀"
     keyboard = [
         [InlineKeyboardButton("📊 Screener Analysis", callback_data='help_analysis'), InlineKeyboardButton("⚡ Technicals (DMA)", callback_data='help_technicals')],
         [InlineKeyboardButton("➕ Add Stock / ISIN", callback_data='help_add'), InlineKeyboardButton("❌ Remove Stock", callback_data='help_remove')],
@@ -131,9 +151,9 @@ async def analyze_stock_data(update: Update, ticker: str, user_id: int):
     
     status_msg = await msg.reply_text(f"⏳ **{resolved}** का लाइव डेटा निकाला जा रहा है...")
     
-    g_data = await fetch_live_price_google(resolved)
+    g_data = await fetch_live_price(resolved)
     if not g_data["success"] or g_data["price"] is None:
-        await status_msg.edit_text("❌ इस स्टॉक का लाइव भाव गूगल फाइनेंस पर नहीं मिल सका।")
+        await status_msg.edit_text("❌ इस स्टॉक का लाइव भाव किसी भी इंजन से नहीं मिल सका। कृपया सिंबल चेक करें।")
         return
         
     price = g_data["price"]
@@ -150,8 +170,11 @@ async def analyze_stock_data(update: Update, ticker: str, user_id: int):
     else:
         d50_str, d200_str, sig = "N/A", "N/A", "N/A"
 
-    clean_tv = resolved.replace(".BO", "").replace(".NS", "")
-    tradingview_link = f"https://www.tradingview.com/symbols/BSE-{clean_tv}/" if resolved.endswith(".BO") else f"https://www.tradingview.com/symbols/NSE-{clean_tv}/"
+    # डायनेमिक लिंक्स जनरेशन
+    clean_sym = resolved.replace(".BO", "").replace(".NS", "").lower()
+    screener_url = f"https://www.screener.in/company/{clean_sym.upper()}/"
+    chartink_url = f"https://chartink.com/stocks/{clean_sym}.html"
+    groww_url = f"https://groww.in/stocks/{clean_sym}"
 
     res = f"📊 **SCREENER ANALYSIS: {name}**\n"
     res += f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -160,10 +183,15 @@ async def analyze_stock_data(update: Update, ticker: str, user_id: int):
     res += f"📉 **200 DMA:** {d200_str}\n"
     res += f"⚡ **चार्ट सिग्नल:** {sig}\n"
     res += f"━━━━━━━━━━━━━━━━━━━━\n"
-    res += f"🔗 [TradingView Live Chart]({tradingview_link})\n"
+    
+    # इनलाइन बटन्स के रूप में लिंक्स भेजना
+    links_keyboard = [
+        [InlineKeyboardButton("📈 Chartink पर चार्ट देखें", url=chartink_url)],
+        [InlineKeyboardButton("🔍 Screener डेटा", url=screener_url), InlineKeyboardButton("🌱 Groww ऐप पर देखें", url=groww_url)]
+    ]
     
     await status_msg.delete()
-    await msg.reply_text(res, parse_mode="Markdown", disable_web_page_preview=True)
+    await msg.reply_text(res, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(links_keyboard))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -176,13 +204,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def run_analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.effective_message.reply_text("❌ कृपया स्टॉक सिंबल या ISIN कोड साथ में लिखें।\nउदाहरण: `/analyze NTPC`")
+        await update.effective_message.reply_text("❌ कृपया स्टॉक सिंबल या ISIN कोड साथ में लिखें।\nउदाहरण: `/analyze BALAJIPHOS`")
         return
     await analyze_stock_data(update, context.args[0].upper(), update.effective_user.id)
 
 async def add_to_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.effective_message.reply_text("❌ कृपया जोड़ने के लिए स्टॉक सिंबल या ISIN कोड लिखें।\nउदाहरण: `/add NTPC`")
+        await update.effective_message.reply_text("❌ कृपया स्टॉक सिंबल या ISIN कोड लिखें।")
         return
         
     user_id = update.effective_user.id
@@ -206,7 +234,7 @@ async def add_to_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if db_status == "added":
         await update.effective_message.reply_text(f"✅ **{ticker}** वॉचलिस्ट में ऐड हो गया है!", parse_mode="Markdown")
     else:
-        await update.effective_message.reply_text(f"ℹ️ {ticker} पहले से आपकी वॉचलिस्ट में मौजूद है।")
+        await update.effective_message.reply_text(f"ℹ️ {ticker} पहले से मौजूद है।")
 
 async def show_watchlist_logic(update: Update, user_id: int):
     msg = update.effective_message
@@ -224,12 +252,12 @@ async def show_watchlist_logic(update: Update, user_id: int):
         await msg.reply_text("📋 आपकी वॉचलिस्ट अभी खाली है।")
         return
     
-    status_msg = await msg.reply_text("🔄 गूगल फाइनेंस से लाइव भाव निकाला जा रहा है...")
-    res = "📋 **आपकी पर्सनल वॉचलिस्ट (Google Core):**\n\n"
+    status_msg = await msg.reply_text("🔄 हाइब्रिड इंजन से लाइव भाव निकाला जा रहा है...")
+    res = "📋 **आपकी पर्सनल वॉचलिस्ट (Hybrid Core):**\n\n"
     
     for db_ticker in stock_list:
         resolved_ticker = await resolve_isin_to_ticker(db_ticker)
-        g_data = await fetch_live_price_google(resolved_ticker)
+        g_data = await fetch_live_price(resolved_ticker)
         
         if g_data["success"] and g_data["price"] is not None:
             price_str = f"₹{g_data['price']:.2f}"
@@ -242,7 +270,7 @@ async def show_watchlist_logic(update: Update, user_id: int):
 
 async def remove_from_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.effective_message.reply_text("❌ कृपया हटाने के लिए स्टॉक सिंबल लिखें।\nउदाहरण: `/remove NTPC`")
+        await update.effective_message.reply_text("❌ कृपया हटाने के लिए स्टॉक सिंबल लिखें।")
         return
         
     user_id = update.effective_user.id
@@ -278,7 +306,7 @@ def main():
     app.add_handler(CommandHandler("watchlist", lambda u, c: show_watchlist_logic(u, u.effective_user.id)))
     app.add_handler(CommandHandler("remove", remove_from_watchlist))
     app.add_handler(CallbackQueryHandler(button_handler))
-    print("🤖 Starting AI Stock Assistant v6.4 (Async Production Core)...")
+    print("🤖 Starting AI Stock Assistant v6.5 (Ultra Hybrid Core)...")
     threading.Thread(target=run_dummy_server, daemon=True).start()
     app.run_polling(drop_pending_updates=True)
 
