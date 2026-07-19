@@ -4,6 +4,7 @@ import threading
 import sqlite3
 import requests
 import re
+import asyncio
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
@@ -12,14 +13,13 @@ from config import BOT_TOKEN
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 DB_NAME = "watchlist.db"
 
-# === 1. मास्टर मैनुअल ISIN मैपिंग ===
 MANUAL_ISIN_MAPPING = {
     "INE732K01027": "511557.BO",       # प्रो-फिन कैपिटल (BSE)
     "INE0PQ601019": "BALAJIPHOS.NS",   # बालाजी फॉस्फेट्स (NSE)
 }
 
-# === 2. गूगल फाइनेंस बाईपास इंजन (डायनेमिक क्लास फिक्स के साथ) ===
-def fetch_live_price_google(ticker):
+# === 1. गूगल फाइनेंस इंजन (Thread Safe) ===
+def _fetch_google_sync(ticker):
     target = ticker.strip().upper()
     if target.endswith(".NS"):
         g_ticker = target.replace(".NS", ":NSE")
@@ -38,7 +38,6 @@ def fetch_live_price_google(ticker):
         res = requests.get(url, headers=headers, cookies=cookies, timeout=5)
         if res.status_code == 200:
             html = res.text
-            # [FIXED] अब यह गूगल की डायनेमिक क्लास (YMlKec के आगे कुछ भी हो) को आसानी से पार्स कर लेगा
             price_match = re.search(r'class="[^"]*YMlKec[^"]*">([^<]+)', html)
             name_match = re.search(r'class="[^"]*ZZ33Fa[^"]*">([^<]+)', html)
             
@@ -50,8 +49,12 @@ def fetch_live_price_google(ticker):
         logging.error(f"Google Engine Error for {g_ticker}: {e}")
     return {"success": False, "price": None, "name": ticker}
 
-# === 3. बैकअप चार्ट एपीआई ===
-def fetch_dma_backup(symbol):
+async def fetch_live_price_google(ticker):
+    # ब्लॉकिंग नेटवर्क कॉल को अलग थ्रेड में चलाएं ताकि बोट अटके नहीं
+    return await asyncio.to_thread(_fetch_google_sync, ticker)
+
+# === 2. बैकअप चार्ट एपीआई (Thread Safe) ===
+def _fetch_dma_sync(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1y"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -65,6 +68,9 @@ def fetch_dma_backup(symbol):
         pass
     return []
 
+async def fetch_dma_backup(symbol):
+    return await asyncio.to_thread(_fetch_dma_sync, symbol)
+
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -72,7 +78,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-def resolve_isin_to_ticker(symbol_or_isin):
+def _resolve_isin_sync(symbol_or_isin):
     target = symbol_or_isin.strip().upper()
     if target in MANUAL_ISIN_MAPPING:
         return MANUAL_ISIN_MAPPING[target]
@@ -85,22 +91,25 @@ def resolve_isin_to_ticker(symbol_or_isin):
             if res.status_code == 200:
                 data = res.json()
                 quotes = data.get("quotes", [])
+                for q in quotes:
+                    sym = q.get("symbol", "")
+                    if sym.endswith(".NS") or sym.endswith(".BO"):
+                        return sym
                 if quotes:
-                    for q in quotes:
-                        sym = q.get("symbol", "")
-                        if sym.endswith(".NS") or sym.endswith(".BO"):
-                            return sym
                     return quotes[0].get("symbol", "")
         except:
             pass
     return target
+
+async def resolve_isin_to_ticker(symbol_or_isin):
+    return await asyncio.to_thread(_resolve_isin_sync, symbol_or_isin)
 
 class DummyServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bot is online on Dynamic Regex Engine v6.3")
+        self.wfile.write(b"Bot is online on Async Core v6.4")
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 10000))
@@ -108,30 +117,30 @@ def run_dummy_server():
     server.serve_forever()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "🤖 **AI STOCK ASSISTANT v6.3 (Dynamic Regex Core)**\n\nगूगल के नए लेआउट/क्लास चेंजेस को बाईपास कर दिया गया है! अब NTPC और बाकी सभी हैवी स्टॉक्स परफेक्ट काम करेंगे। 🚀"
+    text = "🤖 **AI STOCK ASSISTANT v6.4 (Async Production Core)**\n\nसभी ब्लॉकिंग बग्स फिक्स कर दिए गए हैं। बोट अब सुपरफास्ट रिप्लाई करेगा! 🚀"
     keyboard = [
         [InlineKeyboardButton("📊 Screener Analysis", callback_data='help_analysis'), InlineKeyboardButton("⚡ Technicals (DMA)", callback_data='help_technicals')],
         [InlineKeyboardButton("➕ Add Stock / ISIN", callback_data='help_add'), InlineKeyboardButton("❌ Remove Stock", callback_data='help_remove')],
         [InlineKeyboardButton("📋 Watchlist देखें", callback_data='view_wl')]
     ]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 async def analyze_stock_data(update: Update, ticker: str, user_id: int):
-    msg = update.callback_query.message if update.callback_query else update.message
-    resolved = resolve_isin_to_ticker(ticker)
+    msg = update.effective_message
+    resolved = await resolve_isin_to_ticker(ticker)
     
-    await msg.reply_text(f"⏳ **{resolved}** का लाइव डेटा निकाला जा रहा है...")
+    status_msg = await msg.reply_text(f"⏳ **{resolved}** का लाइव डेटा निकाला जा रहा है...")
     
-    g_data = fetch_live_price_google(resolved)
+    g_data = await fetch_live_price_google(resolved)
     if not g_data["success"] or g_data["price"] is None:
-        await msg.reply_text("❌ इस स्टॉक का लाइव भाव गूगल फाइनेंस पर नहीं मिल सका।")
+        await status_msg.edit_text("❌ इस स्टॉक का लाइव भाव गूगल फाइनेंस पर नहीं मिल सका।")
         return
         
     price = g_data["price"]
     name = g_data["name"]
     
     symbol = f"{resolved}.NS" if not (resolved.endswith(".NS") or resolved.endswith(".BO")) else resolved
-    prices_list = fetch_dma_backup(symbol)
+    prices_list = await fetch_dma_backup(symbol)
     
     if len(prices_list) >= 200:
         dma_50 = sum(prices_list[-50:]) / 50
@@ -152,6 +161,8 @@ async def analyze_stock_data(update: Update, ticker: str, user_id: int):
     res += f"⚡ **चार्ट सिग्नल:** {sig}\n"
     res += f"━━━━━━━━━━━━━━━━━━━━\n"
     res += f"🔗 [TradingView Live Chart]({tradingview_link})\n"
+    
+    await status_msg.delete()
     await msg.reply_text(res, parse_mode="Markdown", disable_web_page_preview=True)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -164,45 +175,61 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif q.data == 'help_remove': await q.message.reply_text("❌ हटाने के लिए टाइप करें: `/remove STOCK`")
 
 async def run_analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args: return
+    if not context.args:
+        await update.effective_message.reply_text("❌ कृपया स्टॉक सिंबल या ISIN कोड साथ में लिखें।\nउदाहरण: `/analyze NTPC`")
+        return
     await analyze_stock_data(update, context.args[0].upper(), update.effective_user.id)
 
 async def add_to_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args: return
+    if not context.args:
+        await update.effective_message.reply_text("❌ कृपया जोड़ने के लिए स्टॉक सिंबल या ISIN कोड लिखें।\nउदाहरण: `/add NTPC`")
+        return
+        
     user_id = update.effective_user.id
     raw_input = context.args[0].upper()
-    ticker = resolve_isin_to_ticker(raw_input)
+    ticker = await resolve_isin_to_ticker(raw_input)
     
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    try:
-        c.execute("INSERT INTO watchlist VALUES (?, ?)", (user_id, ticker))
-        conn.commit()
-        await update.message.reply_text(f"✅ **{ticker}** वॉचलिस्ट में ऐड हो गया है!", parse_mode="Markdown")
-    except:
-        await update.message.reply_text(f"ℹ️ {ticker} पहले से मौजूद है।")
-    finally: conn.close()
+    def _db_add():
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        status = "added"
+        try:
+            c.execute("INSERT INTO watchlist VALUES (?, ?)", (user_id, ticker))
+            conn.commit()
+        except:
+            status = "exists"
+        finally:
+            conn.close()
+        return status
+
+    db_status = await asyncio.to_thread(_db_add)
+    if db_status == "added":
+        await update.effective_message.reply_text(f"✅ **{ticker}** वॉचलिस्ट में ऐड हो गया है!", parse_mode="Markdown")
+    else:
+        await update.effective_message.reply_text(f"ℹ️ {ticker} पहले से आपकी वॉचलिस्ट में मौजूद है।")
 
 async def show_watchlist_logic(update: Update, user_id: int):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT stock_symbol FROM watchlist WHERE user_id = ?", (user_id,))
-    rows = c.fetchall()
-    conn.close()
+    msg = update.effective_message
     
-    msg = update.callback_query.message if update.callback_query else update.message
-    if not rows:
+    def _db_read():
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("SELECT stock_symbol FROM watchlist WHERE user_id = ?", (user_id,))
+        rows = c.fetchall()
+        conn.close()
+        return [r[0] for r in rows]
+
+    stock_list = await asyncio.to_thread(_db_read)
+    if not stock_list:
         await msg.reply_text("📋 आपकी वॉचलिस्ट अभी खाली है।")
         return
     
-    await msg.reply_text("🔄 गूगल फाइनेंस से लाइव भाव निकाला जा रहा है...")
+    status_msg = await msg.reply_text("🔄 गूगल फाइनेंस से लाइव भाव निकाला जा रहा है...")
     res = "📋 **आपकी पर्सनल वॉचलिस्ट (Google Core):**\n\n"
     
-    for r in rows:
-        db_ticker = r[0]
-        resolved_ticker = resolve_isin_to_ticker(db_ticker)
-        
-        g_data = fetch_live_price_google(resolved_ticker)
+    for db_ticker in stock_list:
+        resolved_ticker = await resolve_isin_to_ticker(db_ticker)
+        g_data = await fetch_live_price_google(resolved_ticker)
         
         if g_data["success"] and g_data["price"] is not None:
             price_str = f"₹{g_data['price']:.2f}"
@@ -210,28 +237,37 @@ async def show_watchlist_logic(update: Update, user_id: int):
         else:
             res += f"🔹 **{resolved_ticker}**: भाव अस्थायी रूप से अनुपलब्ध\n"
             
+    await status_msg.delete()
     await msg.reply_text(res, parse_mode="Markdown")
 
 async def remove_from_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args: return
+    if not context.args:
+        await update.effective_message.reply_text("❌ कृपया हटाने के लिए स्टॉक सिंबल लिखें।\nउदाहरण: `/remove NTPC`")
+        return
+        
     user_id = update.effective_user.id
     ticker = context.args[0].upper()
-    resolved_ticker = resolve_isin_to_ticker(ticker)
+    resolved_ticker = await resolve_isin_to_ticker(ticker)
     
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    try:
-        c.execute("DELETE FROM watchlist WHERE user_id = ? AND (stock_symbol = ? OR stock_symbol = ?)", (user_id, ticker, resolved_ticker))
-        changes = conn.total_changes
-        conn.commit()
-        if changes > 0: 
-            await update.message.reply_text(f"❌ **{ticker}** को वॉचलिस्ट से हटा दिया गया है।")
-        else: 
-            await update.message.reply_text("ℹ️ STOCK वॉचलिस्ट में नहीं मिला।")
-    except Exception as e:
-        await update.message.reply_text("❌ हटाने के दौरान कोई एरर आया।")
-    finally: 
-        conn.close()
+    def _db_remove():
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        changes = 0
+        try:
+            c.execute("DELETE FROM watchlist WHERE user_id = ? AND (stock_symbol = ? OR stock_symbol = ?)", (user_id, ticker, resolved_ticker))
+            changes = conn.total_changes
+            conn.commit()
+        except:
+            pass
+        finally:
+            conn.close()
+        return changes
+
+    deleted_rows = await asyncio.to_thread(_db_remove)
+    if deleted_rows > 0: 
+        await update.effective_message.reply_text(f"❌ **{ticker}** को वॉचलिस्ट से हटा दिया गया है।")
+    else: 
+        await update.effective_message.reply_text("ℹ️ यह स्टॉक आपकी वॉचलिस्ट में नहीं मिला।")
 
 def main():
     init_db()
@@ -242,7 +278,7 @@ def main():
     app.add_handler(CommandHandler("watchlist", lambda u, c: show_watchlist_logic(u, u.effective_user.id)))
     app.add_handler(CommandHandler("remove", remove_from_watchlist))
     app.add_handler(CallbackQueryHandler(button_handler))
-    print("🤖 Starting AI Stock Assistant v6.3 (Dynamic Regex Core)...")
+    print("🤖 Starting AI Stock Assistant v6.4 (Async Production Core)...")
     threading.Thread(target=run_dummy_server, daemon=True).start()
     app.run_polling(drop_pending_updates=True)
 
